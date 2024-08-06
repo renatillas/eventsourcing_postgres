@@ -1,7 +1,9 @@
 import eventsourcing
+import gleam/bool
 import gleam/dynamic
 import gleam/int
 import gleam/io
+import gleam/json
 import gleam/list
 import gleam/pair
 import gleam/pgo
@@ -11,13 +13,13 @@ import gleam/result
 
 const insert_event_query = "
   INSERT INTO event 
-  (aggregate_type, aggregate_id, sequence, event_type, event_version, payload)
+  (aggregate_type, aggregate_id, sequence, event_type, event_version, payload, metadata)
   VALUES 
-  ($1, $2, $3, $4, $5, $6)
+  ($1, $2, $3, $4, $5, $6, $7)
   "
 
 const select_events_query = "
-  SELECT aggregate_type, aggregate_id, sequence, event_type, event_version, payload
+  SELECT aggregate_type, aggregate_id, sequence, event_type, event_version, payload, metadata
   FROM event
   WHERE aggregate_type = $1 AND aggregate_id = $2
   ORDER BY sequence
@@ -32,11 +34,15 @@ const create_event_table_query = "
     event_type     text                         NOT NULL,
     event_version  text                         NOT NULL,
     payload        text                         NOT NULL,
+    metadata       text                         NOT NULL,
     PRIMARY KEY (aggregate_type, aggregate_id, sequence)
   );
   "
 
 // TYPES ----
+
+type Metadata =
+  List(#(String, String))
 
 pub opaque type PostgresStore(entity, command, event, error) {
   PostgresStore(
@@ -54,7 +60,7 @@ pub opaque type PostgresStore(entity, command, event, error) {
 
 pub fn new(
   pgo_config pgo_config: pgo.Config,
-  emtpy_entity empty_entity: entity,
+  empty_entity empty_entity: entity,
   handle_command_function handle: eventsourcing.Handle(
     entity,
     command,
@@ -109,8 +115,27 @@ pub fn create_event_table(
 pub fn load_aggregate_entity(
   postgres_store: PostgresStore(entity, command, event, error),
   aggregate_id: eventsourcing.AggregateId,
-) -> entity {
-  load_aggregate(postgres_store, aggregate_id).aggregate.entity
+) -> Result(entity, Nil) {
+  let assert Ok(commited_events) = load_events(postgres_store, aggregate_id)
+  use <- bool.guard(commited_events |> list.length == 0, Error(Nil))
+  let #(aggregate, sequence) =
+    list.fold(
+      over: commited_events,
+      from: #(postgres_store.empty_aggregate, 0),
+      with: fn(aggregate_and_sequence, event_envelop) {
+        let #(aggregate, _) = aggregate_and_sequence
+        #(
+          eventsourcing.Aggregate(
+            ..aggregate,
+            entity: aggregate.apply(aggregate.entity, event_envelop.payload),
+          ),
+          event_envelop.sequence,
+        )
+      },
+    )
+  Ok(
+    eventsourcing.AggregateContext(aggregate_id:, aggregate:, sequence:).aggregate.entity,
+  )
 }
 
 pub fn load_events(
@@ -121,7 +146,7 @@ pub fn load_events(
     select_events_query,
     on: postgres_store.db,
     with: [pgo.text(postgres_store.aggregate_type), pgo.text(aggregate_id)],
-    expecting: dynamic.decode6(
+    expecting: dynamic.decode7(
       eventsourcing.SerializedEventEnvelop,
       dynamic.element(1, dynamic.string),
       dynamic.element(2, dynamic.int),
@@ -130,9 +155,10 @@ pub fn load_events(
           dynamic.string(dyn) |> result.map(postgres_store.event_decoder)
         payload
       }),
-      dynamic.element(3, dynamic.string),
+      dynamic.element(6, metadata_decoder),
       dynamic.element(4, dynamic.string),
       dynamic.element(0, dynamic.string),
+      dynamic.element(3, dynamic.string),
     ),
   ))
   resulted.rows
@@ -166,10 +192,11 @@ fn commit(
   postgres_store: PostgresStore(entity, command, event, error),
   context: eventsourcing.AggregateContext(entity, command, event, error),
   events: List(event),
+  metadata: Metadata,
 ) {
   let eventsourcing.AggregateContext(aggregate_id, _, sequence) = context
   let wrapped_events =
-    wrap_events(postgres_store, aggregate_id, events, sequence)
+    wrap_events(postgres_store, aggregate_id, events, sequence, metadata)
   persist_events(postgres_store, wrapped_events)
   io.println(
     "storing: "
@@ -186,6 +213,7 @@ fn wrap_events(
   aggregate_id: eventsourcing.AggregateId,
   events: List(event),
   sequence: Int,
+  metadata: Metadata,
 ) -> List(eventsourcing.EventEnvelop(event)) {
   list.map_fold(
     over: events,
@@ -198,6 +226,7 @@ fn wrap_events(
           aggregate_id:,
           sequence: sequence + 1,
           payload: event,
+          metadata: metadata,
           event_type: postgres_store.event_type,
           event_version: postgres_store.event_version,
           aggregate_type: postgres_store.aggregate_type,
@@ -218,6 +247,7 @@ fn persist_events(
       aggregate_id,
       sequence,
       payload,
+      metadata,
       event_type,
       event_version,
       aggregate_type,
@@ -233,8 +263,35 @@ fn persist_events(
         pgo.text(event_type),
         pgo.text(event_version),
         pgo.text(payload |> postgres_store.event_encoder),
+        pgo.text(metadata |> metadata_encoder),
       ],
       expecting: dynamic.dynamic,
     )
+  })
+}
+
+fn metadata_encoder(metadata: Metadata) -> String {
+  json.array(metadata, fn(row) {
+    json.preprocessed_array([json.string(row.0), json.string(row.1)])
+  })
+  |> json.to_string
+}
+
+fn metadata_decoder(
+  dyn_metadata: dynamic.Dynamic,
+) -> Result(Metadata, List(dynamic.DecodeError)) {
+  use str_metadata <- result.try(dynamic.string(dyn_metadata))
+  use list_metadata <- result.map(
+    json.decode(
+      str_metadata,
+      dynamic.list(of: dynamic.list(of: dynamic.string)),
+    )
+    |> result.map_error(fn(_) { panic }),
+  )
+  list.map(list_metadata, fn(metadata) {
+    case metadata {
+      [key, value] -> #(key, value)
+      _ -> panic
+    }
   })
 }

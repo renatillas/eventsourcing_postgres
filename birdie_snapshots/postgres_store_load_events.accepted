@@ -1,0 +1,35 @@
+---
+version: 1.1.8
+title: postgres store load events
+file: ./test/eventsourcing_postgres_test.gleam
+test_name: postgres_store_load_events_test
+---
+[
+  SerializedEventEnvelop(
+    "92085b42-032c-4d7a-84de-a86d67123858",
+    1,
+    AccountOpened("92085b42-032c-4d7a-84de-a86d67123858"),
+    [#("meta", "data")],
+    "1.0",
+    "BankAccount",
+    "BankAccountEvent",
+  ),
+  SerializedEventEnvelop(
+    "92085b42-032c-4d7a-84de-a86d67123858",
+    2,
+    CustomerDepositedCash(10.0, 10.0),
+    [],
+    "1.0",
+    "BankAccount",
+    "BankAccountEvent",
+  ),
+  SerializedEventEnvelop(
+    "92085b42-032c-4d7a-84de-a86d67123858",
+    3,
+    CustomerWithdrewCash(5.99, 4.01),
+    [],
+    "1.0",
+    "BankAccount",
+    "BankAccountEvent",
+  ),
+]
