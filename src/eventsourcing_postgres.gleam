@@ -1,8 +1,6 @@
 import eventsourcing
 import gleam/bool
 import gleam/dynamic
-import gleam/int
-import gleam/io
 import gleam/json
 import gleam/list
 import gleam/pair
@@ -198,13 +196,6 @@ fn commit(
   let wrapped_events =
     wrap_events(postgres_store, aggregate_id, events, sequence, metadata)
   persist_events(postgres_store, wrapped_events)
-  io.println(
-    "storing: "
-    <> wrapped_events |> list.length |> int.to_string
-    <> " events for Aggregate ID '"
-    <> aggregate_id
-    <> "'",
-  )
   wrapped_events
 }
 
