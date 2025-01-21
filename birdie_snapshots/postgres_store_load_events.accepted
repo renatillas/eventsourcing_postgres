@@ -1,10 +1,10 @@
 ---
-version: 1.1.8
+version: 1.2.5
 title: postgres store load events
 file: ./test/eventsourcing_postgres_test.gleam
 test_name: postgres_store_load_events_test
 ---
-[
+Ok([
   SerializedEventEnvelop(
     "92085b42-032c-4d7a-84de-a86d67123858",
     1,
@@ -32,4 +32,4 @@ test_name: postgres_store_load_events_test
     "BankAccount",
     "BankAccountEvent",
   ),
-]
+])
