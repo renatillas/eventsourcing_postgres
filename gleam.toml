@@ -1,5 +1,5 @@
 name = "eventsourcing_postgres"
-version = "3.0.0"
+version = "4.0.0"
 
 # Fill out these fields if you intend to generate HTML documentation or publish
 # your project to the Hex package manager.
@@ -13,7 +13,7 @@ repository = { type = "github", user = "renatillas", repo = "eventsourcing_postg
 
 [dependencies]
 gleam_stdlib = ">= 0.52.0 and < 2.0.0"
-eventsourcing = ">= 4.0.0 and < 5.0.0"
+eventsourcing = ">= 5.0.0 and < 6.0.0"
 pog = ">= 3.2.0 and < 4.0.0"
 gleam_json = ">= 2.3.0 and < 3.0.0"
 

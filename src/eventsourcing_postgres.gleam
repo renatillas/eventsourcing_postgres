@@ -44,7 +44,6 @@ type Metadata =
 pub opaque type PostgresStore(entity, command, event, error) {
   PostgresStore(
     db: pog.Connection,
-    empty_aggregate: eventsourcing.Aggregate(entity, command, event, error),
     event_encoder: fn(event) -> String,
     event_decoder: fn(String) -> Result(event, List(decode.DecodeError)),
     event_type: String,
@@ -57,14 +56,6 @@ pub opaque type PostgresStore(entity, command, event, error) {
 
 pub fn new(
   pgo_config pgo_config: pog.Config,
-  empty_entity empty_entity: entity,
-  handle_command_function handle: eventsourcing.Handle(
-    entity,
-    command,
-    event,
-    error,
-  ),
-  apply_function apply: eventsourcing.Apply(entity, event),
   event_encoder event_encoder: fn(event) -> String,
   event_decoder event_decoder: fn(String) ->
     Result(event, List(decode.DecodeError)),
@@ -83,7 +74,6 @@ pub fn new(
   let eventstore =
     PostgresStore(
       db:,
-      empty_aggregate: eventsourcing.Aggregate(empty_entity, handle, apply),
       event_encoder:,
       event_decoder:,
       event_type:,
@@ -94,7 +84,6 @@ pub fn new(
   eventsourcing.EventStore(
     eventstore:,
     commit: commit,
-    load_aggregate: load_aggregate,
     load_events: load_events,
   )
 }
@@ -115,7 +104,7 @@ fn load_events(
     use sequence <- decode.field(2, decode.int)
     use payload <- decode.field(5, {
       use payload <- decode.then(decode.string)
-      // TODO:  remove this assert 
+      // TODO: remove assert
       let assert Ok(payload) = postgres_store.event_decoder(payload)
       decode.success(payload)
     })
@@ -158,37 +147,13 @@ fn metadata_decoder() {
   |> decode.success
 }
 
-fn load_aggregate(
-  postgres_store: PostgresStore(entity, command, event, error),
-  aggregate_id: eventsourcing.AggregateId,
-) -> eventsourcing.AggregateContext(entity, command, event, error) {
-  let commited_events = load_events(postgres_store, aggregate_id)
-
-  let #(aggregate, sequence) =
-    list.fold(
-      over: commited_events,
-      from: #(postgres_store.empty_aggregate, 0),
-      with: fn(aggregate_and_sequence, event_envelop) {
-        let #(aggregate, _) = aggregate_and_sequence
-        #(
-          eventsourcing.Aggregate(
-            ..aggregate,
-            entity: aggregate.apply(aggregate.entity, event_envelop.payload),
-          ),
-          event_envelop.sequence,
-        )
-      },
-    )
-  eventsourcing.AggregateContext(aggregate_id:, aggregate:, sequence:)
-}
-
 fn commit(
   postgres_store: PostgresStore(entity, command, event, error),
-  context: eventsourcing.AggregateContext(entity, command, event, error),
+  context: eventsourcing.Aggregate(entity, command, event, error),
   events: List(event),
   metadata: Metadata,
 ) {
-  let eventsourcing.AggregateContext(aggregate_id, _, sequence) = context
+  let eventsourcing.Aggregate(aggregate_id, _, sequence) = context
   let wrapped_events =
     wrap_events(postgres_store, aggregate_id, events, sequence, metadata)
   persist_events(postgres_store, wrapped_events)

@@ -19,7 +19,14 @@ pub fn postgres_store_test() {
   eventsourcing_postgres.create_event_table(postgres_store.eventstore)
   |> should.be_ok
 
-  let event_sourcing = eventsourcing.new(postgres_store, [query])
+  let event_sourcing =
+    eventsourcing.new(
+      postgres_store,
+      [query],
+      example_bank_account.handle,
+      example_bank_account.apply,
+      example_bank_account.BankAccount(opened: False, balance: 0.0),
+    )
 
   eventsourcing.execute(
     event_sourcing,
@@ -59,9 +66,6 @@ fn postgres_store() {
       ..pog.default_config(),
       password: option.Some("postgres"),
     ),
-    empty_entity: example_bank_account.BankAccount(opened: False, balance: 0.0),
-    handle_command_function: example_bank_account.handle,
-    apply_function: example_bank_account.apply,
     event_encoder: example_bank_account.event_encoder,
     event_decoder: example_bank_account.event_decoder,
     event_type: example_bank_account.bank_account_event_type,
@@ -80,7 +84,14 @@ pub fn postgres_store_load_events_test() {
   eventsourcing_postgres.create_event_table(postgres_store.eventstore)
   |> should.be_ok
 
-  let event_sourcing = eventsourcing.new(postgres_store, [query])
+  let event_sourcing =
+    eventsourcing.new(
+      postgres_store,
+      [query],
+      example_bank_account.handle,
+      example_bank_account.apply,
+      example_bank_account.BankAccount(opened: False, balance: 0.0),
+    )
 
   eventsourcing.execute_with_metadata(
     event_sourcing,
