@@ -1,7 +1,5 @@
 import gleam/dynamic/decode
-import gleam/io
 import gleam/json
-import gleam/result
 
 pub type BankAccount {
   BankAccount(opened: Bool, balance: Float)
@@ -19,6 +17,7 @@ pub type BankAccountEvent {
   AccountOpened(account_id: String)
   CustomerDepositedCash(amount: Float, balance: Float)
   CustomerWithdrewCash(amount: Float, balance: Float)
+  CustomerBecamePoor
 }
 
 pub const bank_account_event_type = "BankAccountEvent"
@@ -38,9 +37,11 @@ pub fn handle(
     }
     WithDrawMoney(amount) -> {
       let balance = bank_account.balance -. amount
-      case amount >. 0.0 && balance >. 0.0 {
-        True -> Ok([CustomerWithdrewCash(amount:, balance:)])
-        False -> Error(Nil)
+      case amount >. 0.0 {
+        True if balance >. 0.0 -> Ok([CustomerWithdrewCash(amount:, balance:)])
+        True if balance == 0.0 ->
+          Ok([CustomerWithdrewCash(amount:, balance:), CustomerBecamePoor])
+        _ -> Error(Nil)
       }
     }
   }
@@ -51,6 +52,7 @@ pub fn apply(bank_account: BankAccount, event: BankAccountEvent) {
     AccountOpened(_) -> BankAccount(..bank_account, opened: True)
     CustomerDepositedCash(_, balance) -> BankAccount(..bank_account, balance:)
     CustomerWithdrewCash(_, balance) -> BankAccount(..bank_account, balance:)
+    CustomerBecamePoor -> BankAccount(..bank_account, opened: False)
   }
 }
 
@@ -73,13 +75,13 @@ pub fn event_encoder(event: BankAccountEvent) -> String {
         #("amount", json.float(amount)),
         #("balance", json.float(balance)),
       ])
+    CustomerBecamePoor ->
+      json.object([#("event-type", json.string("customer-became-poor"))])
   }
   |> json.to_string
 }
 
-pub fn event_decoder(
-  string: String,
-) -> Result(BankAccountEvent, List(decode.DecodeError)) {
+pub fn event_decoder() -> decode.Decoder(BankAccountEvent) {
   let account_opened_decoder = {
     use account_id <- decode.field("account-id", decode.string)
     decode.success(AccountOpened(account_id))
@@ -97,14 +99,25 @@ pub fn event_decoder(
     decode.success(CustomerWithdrewCash(amount, balance))
   }
 
-  let decoder = {
-    use tag <- decode.field("event-type", decode.string)
-    case tag {
-      "account-opened" -> account_opened_decoder
-      "customer-deposited-cash" -> customer_deposited_cash
-      _ -> customer_withdrew_cash
-    }
+  use tag <- decode.field("event-type", decode.string)
+  case tag {
+    "account-opened" -> account_opened_decoder
+    "customer-deposited-cash" -> customer_deposited_cash
+    "customer-became-poor" -> decode.success(CustomerBecamePoor)
+    _ -> customer_withdrew_cash
   }
-  json.parse(from: string, using: decoder)
-  |> result.map_error(fn(_) { [] })
+}
+
+pub fn entity_encoder(bank: BankAccount) -> String {
+  json.object([
+    #("opened", json.bool(bank.opened)),
+    #("balance", json.float(bank.balance)),
+  ])
+  |> json.to_string
+}
+
+pub fn entity_decoder() -> decode.Decoder(BankAccount) {
+  use opened <- decode.field("opened", decode.bool)
+  use balance <- decode.field("balance", decode.float)
+  decode.success(BankAccount(opened, balance))
 }

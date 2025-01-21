@@ -12,6 +12,36 @@ pub fn main() {
   gleeunit.main()
 }
 
+fn postgres_store() {
+  eventsourcing_postgres.new(
+    pgo_config: pog.Config(
+      ..pog.default_config(),
+      password: option.Some("postgres"),
+    ),
+    event_encoder: example_bank_account.event_encoder,
+    event_decoder: example_bank_account.event_decoder(),
+    event_type: example_bank_account.bank_account_event_type,
+    event_version: "1.0",
+    aggregate_type: example_bank_account.bank_account_type,
+    entity_encoder: example_bank_account.entity_encoder,
+    entity_decoder: example_bank_account.entity_decoder(),
+  )
+}
+
+fn drop_event_table() {
+  pog.query("DROP table event;")
+  |> pog.execute(on: pog.connect(
+    pog.Config(..pog.default_config(), password: option.Some("postgres")),
+  ))
+}
+
+fn drop_snapshot_table() {
+  pog.query("DROP table snapshot;")
+  |> pog.execute(on: pog.connect(
+    pog.Config(..pog.default_config(), password: option.Some("postgres")),
+  ))
+}
+
 pub fn postgres_store_test() {
   let postgres_store = postgres_store()
   let query = fn(_, _) { Nil }
@@ -19,7 +49,14 @@ pub fn postgres_store_test() {
   eventsourcing_postgres.create_event_table(postgres_store.eventstore)
   |> should.be_ok
 
-  let event_sourcing = eventsourcing.new(postgres_store, [query])
+  let event_sourcing =
+    eventsourcing.new(
+      postgres_store,
+      [query],
+      example_bank_account.handle,
+      example_bank_account.apply,
+      example_bank_account.BankAccount(opened: False, balance: 0.0),
+    )
 
   eventsourcing.execute(
     event_sourcing,
@@ -51,36 +88,25 @@ pub fn postgres_store_test() {
   )
   |> pprint.format
   |> birdie.snap(title: "postgres store")
-}
-
-fn postgres_store() {
-  eventsourcing_postgres.new(
-    pgo_config: pog.Config(
-      ..pog.default_config(),
-      password: option.Some("postgres"),
-    ),
-    empty_entity: example_bank_account.BankAccount(opened: False, balance: 0.0),
-    handle_command_function: example_bank_account.handle,
-    apply_function: example_bank_account.apply,
-    event_encoder: example_bank_account.event_encoder,
-    event_decoder: example_bank_account.event_decoder,
-    event_type: example_bank_account.bank_account_event_type,
-    event_version: "1.0",
-    aggregate_type: example_bank_account.bank_account_type,
-  )
+  drop_event_table()
+  |> should.be_ok
 }
 
 pub fn postgres_store_load_events_test() {
   let postgres_store = postgres_store()
   let query = fn(_, _) { Nil }
 
-  drop_event_table()
-  |> should.be_ok
-
   eventsourcing_postgres.create_event_table(postgres_store.eventstore)
   |> should.be_ok
 
-  let event_sourcing = eventsourcing.new(postgres_store, [query])
+  let event_sourcing =
+    eventsourcing.new(
+      postgres_store,
+      [query],
+      example_bank_account.handle,
+      example_bank_account.apply,
+      example_bank_account.BankAccount(opened: False, balance: 0.0),
+    )
 
   eventsourcing.execute_with_metadata(
     event_sourcing,
@@ -119,9 +145,57 @@ pub fn postgres_store_load_events_test() {
   |> should.be_ok
 }
 
-fn drop_event_table() {
-  pog.query("DROP table event;")
-  |> pog.execute(on: pog.connect(
-    pog.Config(..pog.default_config(), password: option.Some("postgres")),
-  ))
+pub fn postgres_store_store_snapshots_test() {
+  let postgres_store = postgres_store()
+  let query = fn(_, _) { Nil }
+
+  eventsourcing_postgres.create_event_table(postgres_store.eventstore)
+  |> should.be_ok
+  eventsourcing_postgres.create_snapshot_table(postgres_store.eventstore)
+  |> should.be_ok
+
+  let event_sourcing =
+    eventsourcing.new(
+      postgres_store,
+      [query],
+      example_bank_account.handle,
+      example_bank_account.apply,
+      example_bank_account.BankAccount(opened: False, balance: 0.0),
+    )
+    |> eventsourcing.with_snapshots(eventsourcing.SnapshotConfig(2))
+
+  eventsourcing.execute(
+    event_sourcing,
+    "92085b42-032c-4d7a-84de-a86d67123858",
+    example_bank_account.OpenAccount("92085b42-032c-4d7a-84de-a86d67123858"),
+  )
+  |> should.be_ok
+  |> should.equal(Nil)
+
+  eventsourcing.execute(
+    event_sourcing,
+    "92085b42-032c-4d7a-84de-a86d67123858",
+    example_bank_account.DepositMoney(10.0),
+  )
+  |> should.be_ok
+  |> should.equal(Nil)
+
+  eventsourcing.execute(
+    event_sourcing,
+    "92085b42-032c-4d7a-84de-a86d67123858",
+    example_bank_account.WithDrawMoney(5.99),
+  )
+  |> should.be_ok
+  |> should.equal(Nil)
+
+  eventsourcing.load_aggregate(
+    event_sourcing,
+    "92085b42-032c-4d7a-84de-a86d67123858",
+  )
+  |> pprint.format
+  |> birdie.snap(title: "postgres store")
+  drop_event_table()
+  |> should.be_ok
+  drop_snapshot_table()
+  |> should.be_ok
 }
