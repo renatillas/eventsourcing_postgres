@@ -2,6 +2,7 @@ import birdie
 import eventsourcing
 import eventsourcing_postgres
 import example_bank_account
+import exception
 import gleam/option
 import gleeunit
 import gleeunit/should
@@ -43,6 +44,10 @@ fn drop_snapshot_table() {
 }
 
 pub fn postgres_store_test() {
+  use <- exception.defer(fn() {
+    drop_event_table()
+    |> should.be_ok
+  })
   let postgres_store = postgres_store()
   let query = fn(_, _) { Nil }
 
@@ -88,11 +93,13 @@ pub fn postgres_store_test() {
   )
   |> pprint.format
   |> birdie.snap(title: "postgres store")
-  drop_event_table()
-  |> should.be_ok
 }
 
 pub fn postgres_store_load_events_test() {
+  use <- exception.defer(fn() {
+    drop_event_table()
+    |> should.be_ok
+  })
   let postgres_store = postgres_store()
   let query = fn(_, _) { Nil }
 
@@ -140,12 +147,16 @@ pub fn postgres_store_load_events_test() {
   )
   |> pprint.format
   |> birdie.snap(title: "postgres store load events")
-
-  drop_event_table()
-  |> should.be_ok
 }
 
 pub fn postgres_store_store_snapshots_test() {
+  use <- exception.defer(fn() {
+    drop_event_table()
+    |> should.be_ok
+    drop_snapshot_table()
+    |> should.be_ok
+  })
+
   let postgres_store = postgres_store()
   let query = fn(_, _) { Nil }
 
@@ -162,7 +173,7 @@ pub fn postgres_store_store_snapshots_test() {
       example_bank_account.apply,
       example_bank_account.BankAccount(opened: False, balance: 0.0),
     )
-    |> eventsourcing.with_snapshots(eventsourcing.SnapshotConfig(2))
+    |> eventsourcing.with_snapshots(eventsourcing.SnapshotConfig(1))
 
   eventsourcing.execute(
     event_sourcing,
@@ -188,14 +199,10 @@ pub fn postgres_store_store_snapshots_test() {
   |> should.be_ok
   |> should.equal(Nil)
 
-  eventsourcing.load_aggregate(
+  eventsourcing.get_latest_snapshot(
     event_sourcing,
     "92085b42-032c-4d7a-84de-a86d67123858",
   )
   |> pprint.format
-  |> birdie.snap(title: "postgres store")
-  drop_event_table()
-  |> should.be_ok
-  drop_snapshot_table()
-  |> should.be_ok
+  |> birdie.snap(title: "postgres snapshot")
 }

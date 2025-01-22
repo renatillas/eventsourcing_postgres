@@ -1,0 +1,12 @@
+---
+version: 1.2.5
+title: postgres snapshot
+file: ./test/eventsourcing_postgres_test.gleam
+test_name: postgres_store_store_snapshots_test
+---
+Ok(Some(Snapshot(
+  "92085b42-032c-4d7a-84de-a86d67123858",
+  BankAccount(True, 4.01),
+  3,
+  1737553670,
+)))
