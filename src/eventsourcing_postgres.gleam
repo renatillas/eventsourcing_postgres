@@ -62,6 +62,13 @@ const save_snapshot_query = "
     entity = EXCLUDED.entity
   "
 
+const select_snapshot_query = "
+  SELECT aggregate_type, aggregate_id, sequence, entity, timestamp
+  FROM snapshot
+  WHERE aggregate_type = $1 
+    AND aggregate_id = $2
+"
+
 // TYPES ----
 
 type Metadata =
@@ -128,7 +135,41 @@ fn load_snapshot(
   Option(eventsourcing.Snapshot(entity)),
   eventsourcing.EventSourcingError(error),
 ) {
-  Ok(None)
+  let row_decoder = {
+    use aggregate_id <- decode.field(1, decode.string)
+    use sequence <- decode.field(2, decode.int)
+    use entity <- decode.field(3, {
+      use entity_string <- decode.then(decode.string)
+      let assert Ok(entity) =
+        json.parse(entity_string, postgres_store.entity_decoder)
+      decode.success(entity)
+    })
+    use timestamp <- decode.field(4, decode.int)
+
+    decode.success(eventsourcing.Snapshot(
+      aggregate_id: aggregate_id,
+      entity: entity,
+      sequence: sequence,
+      timestamp: timestamp,
+    ))
+  }
+
+  pog.query(select_snapshot_query)
+  |> pog.parameter(pog.text(postgres_store.aggregate_type))
+  |> pog.parameter(pog.text(aggregate_id))
+  |> pog.returning(row_decoder)
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(response) {
+    case response.rows {
+      [] -> None
+      [snapshot, ..] -> option.Some(snapshot)
+    }
+  })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to load snapshot: " <> pprint.format(error),
+    )
+  })
 }
 
 fn save_snapshot(
