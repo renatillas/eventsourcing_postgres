@@ -7,8 +7,7 @@ packages = [
   { name = "birdie", version = "1.2.5", build_tools = ["gleam"], requirements = ["argv", "edit_distance", "filepath", "glance", "gleam_community_ansi", "gleam_erlang", "gleam_stdlib", "justin", "rank", "simplifile", "trie_again"], otp_app = "birdie", source = "hex", outer_checksum = "2531AD6AC71C89DFB7ECC8839C3DAB858963ECA425E9308302D3B93B8AE0FEAD" },
   { name = "birl", version = "1.8.0", build_tools = ["gleam"], requirements = ["gleam_regexp", "gleam_stdlib", "ranger"], otp_app = "birl", source = "hex", outer_checksum = "2AC7BA26F998E3DFADDB657148BD5DDFE966958AD4D6D6957DD0D22E5B56C400" },
   { name = "edit_distance", version = "2.0.1", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "edit_distance", source = "hex", outer_checksum = "A1E485C69A70210223E46E63985FA1008B8B2DDA9848B7897469171B29020C05" },
-  { name = "eventsourcing", version = "6.0.0", build_tools = ["gleam"], requirements = ["birl", "gleam_stdlib"], otp_app = "eventsourcing", source = "hex", outer_checksum = "E72DBA6CB88745EC87EAFCBAC1083CF0F1FDDD96CC108276AA867147B313714A" },
-  { name = "exception", version = "2.0.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "exception", source = "hex", outer_checksum = "F5580D584F16A20B7FCDCABF9E9BE9A2C1F6AC4F9176FA6DD0B63E3B20D450AA" },
+  { name = "eventsourcing", version = "6.0.1", build_tools = ["gleam"], requirements = ["birl", "gleam_stdlib"], otp_app = "eventsourcing", source = "hex", outer_checksum = "88AA61514647F7D99D9A1225E96E8E8E9AE16B1A12730CBA397F0F54B045D182" },
   { name = "filepath", version = "1.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "filepath", source = "hex", outer_checksum = "67A6D15FB39EEB69DD31F8C145BB5A421790581BD6AA14B33D64D5A55DBD6587" },
   { name = "glam", version = "2.0.1", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "glam", source = "hex", outer_checksum = "66EC3BCD632E51EED029678F8DF419659C1E57B1A93D874C5131FE220DFAD2B2" },
   { name = "glance", version = "2.0.0", build_tools = ["gleam"], requirements = ["gleam_stdlib", "glexer"], otp_app = "glance", source = "hex", outer_checksum = "784CE3B5658CF589B2E811031992FDADDFA9C7FD2A51F1140EE019F121D6D0EB" },
@@ -16,6 +15,7 @@ packages = [
   { name = "gleam_community_colour", version = "1.4.1", build_tools = ["gleam"], requirements = ["gleam_json", "gleam_stdlib"], otp_app = "gleam_community_colour", source = "hex", outer_checksum = "386CB9B01B33371538672EEA8A6375A0A0ADEF41F17C86DDCB81C92AD00DA610" },
   { name = "gleam_erlang", version = "0.33.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_erlang", source = "hex", outer_checksum = "A1D26B80F01901B59AABEE3475DD4C18D27D58FA5C897D922FCB9B099749C064" },
   { name = "gleam_json", version = "2.3.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_json", source = "hex", outer_checksum = "C55C5C2B318533A8072D221C5E06E5A75711C129E420DD1CE463342106012E5D" },
+  { name = "gleam_otp", version = "0.16.1", build_tools = ["gleam"], requirements = ["gleam_erlang", "gleam_stdlib"], otp_app = "gleam_otp", source = "hex", outer_checksum = "50DA1539FC8E8FA09924EB36A67A2BBB0AD6B27BCDED5A7EF627057CF69D035E" },
   { name = "gleam_regexp", version = "1.0.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_regexp", source = "hex", outer_checksum = "A3655FDD288571E90EE9C4009B719FEF59FA16AFCDF3952A76A125AF23CF1592" },
   { name = "gleam_stdlib", version = "0.52.0", build_tools = ["gleam"], requirements = [], otp_app = "gleam_stdlib", source = "hex", outer_checksum = "50703862DF26453B277688FFCDBE9DD4AC45B3BD9742C0B370DB62BC1629A07D" },
   { name = "gleam_yielder", version = "1.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_yielder", source = "hex", outer_checksum = "8E4E4ECFA7982859F430C57F549200C7749823C106759F4A19A78AEA6687717A" },
@@ -36,8 +36,8 @@ packages = [
 [requirements]
 birdie = { version = ">= 1.2.5 and < 2.0.0" }
 eventsourcing = { version = ">= 6.0.0 and < 7.0.0" }
-exception = { version = ">= 2.0.0 and < 3.0.0" }
 gleam_json = { version = ">= 2.3.0 and < 3.0.0" }
+gleam_otp = { version = ">= 0.16.1 and < 1.0.0" }
 gleam_stdlib = { version = ">= 0.52.0 and < 2.0.0" }
 gleeunit = { version = ">= 1.2.0 and < 2.0.0" }
 pog = { version = ">= 3.2.0 and < 4.0.0" }

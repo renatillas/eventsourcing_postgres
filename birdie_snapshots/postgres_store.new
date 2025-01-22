@@ -1,0 +1,9 @@
+---
+version: 1.2.5
+title: postgres store
+---
+Ok(Aggregate(
+  "92085b42-032c-4d7a-84de-a86d67123858",
+  BankAccount(True, 60.149999999999984),
+  45,
+))
