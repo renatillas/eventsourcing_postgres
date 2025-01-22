@@ -74,7 +74,8 @@ const select_snapshot_query = "
 type Metadata =
   List(#(String, String))
 
-pub opaque type PostgresStore(entity, command, event, error) {
+@internal
+pub type PostgresStore(entity, command, event, error) {
   PostgresStore(
     db: pog.Connection,
     event_encoder: fn(event) -> String,
