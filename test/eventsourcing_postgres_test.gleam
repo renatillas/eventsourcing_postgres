@@ -331,6 +331,11 @@ fn snapshot_concurrent_updates(event_sourcing) {
   // Load events to verify they were all recorded
   eventsourcing.load_events(event_sourcing, account_id)
   |> should.be_ok
+  |> fn(events) {
+    events
+    |> list.length
+    |> should.equal(100)
+  }
   // Verify final state
   eventsourcing.get_latest_snapshot(event_sourcing, account_id)
   |> should.be_ok
