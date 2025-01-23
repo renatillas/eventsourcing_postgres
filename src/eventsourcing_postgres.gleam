@@ -69,6 +69,8 @@ const select_snapshot_query = "
     AND aggregate_id = $2
 "
 
+const isolation_level_query = "LOCK TABLE event IN ACCESS EXCLUSIVE MODE;"
+
 // TYPES ----
 
 type Metadata =
@@ -155,31 +157,32 @@ pub fn new(
         )
       })
     },
-    begin_transaction: fn() {
-      pog.transaction(db, fn(conn) {
-        Ok(eventsourcing.TransactionHandle(context: conn))
-      })
-      |> result.map_error(fn(error) {
-        case error {
-          pog.TransactionQueryError(_) -> eventsourcing.TransactionFailed
-          pog.TransactionRolledBack(_) -> eventsourcing.TransactionRolledBack
-        }
-      })
-    },
-    commit_transaction: fn(_) { Ok(Nil) },
-    rollback_transaction: fn(_) { Ok(Nil) },
+    execute_transaction: execute_in_transaction(db),
+    load_aggregate_transaction: execute_in_transaction(db),
+    get_latest_snapshot_transaction: execute_in_transaction(db),
+    load_events_transaction: execute_in_transaction(db),
   )
 }
 
 fn load_events(
   postgres_store: PostgresStore(entity, command, event, error),
-  tx: eventsourcing.TransactionHandle(pog.Connection),
+  tx: pog.Connection,
   aggregate_id: eventsourcing.AggregateId,
   start_from: Int,
 ) -> Result(
   List(eventsourcing.EventEnvelop(event)),
   eventsourcing.EventSourcingError(error),
 ) {
+  use _ <- result.try(
+    pog.query(isolation_level_query)
+    |> pog.execute(tx)
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to set isolation level: " <> pprint.format(error),
+      )
+    }),
+  )
+
   let row_decoder = {
     use aggregate_id <- decode.field(1, decode.string)
     use sequence <- decode.field(2, decode.int)
@@ -209,7 +212,7 @@ fn load_events(
   |> pog.parameter(pog.text(aggregate_id))
   |> pog.parameter(pog.int(start_from))
   |> pog.returning(row_decoder)
-  |> pog.execute(tx.context)
+  |> pog.execute(tx)
   |> result.map(fn(response) { response.rows })
   |> result.map_error(fn(error) {
     eventsourcing.EventStoreError(
@@ -232,7 +235,7 @@ fn metadata_decoder() {
 
 fn commit_events(
   postgres_store: PostgresStore(entity, command, event, error),
-  tx: eventsourcing.TransactionHandle(pog.Connection),
+  tx: pog.Connection,
   context: eventsourcing.Aggregate(entity, command, event, error),
   events: List(event),
   metadata: Metadata,
@@ -281,7 +284,7 @@ fn wrap_events(
 
 fn persist_events(
   postgres_store: PostgresStore(entity, command, event, error),
-  tx: eventsourcing.TransactionHandle(pog.Connection),
+  tx: pog.Connection,
   wrapped_events: List(eventsourcing.EventEnvelop(event)),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
   // Generate the placeholders for batch insert
@@ -346,7 +349,7 @@ fn persist_events(
 
       // Execute the batch insert
       prepared_query
-      |> pog.execute(tx.context)
+      |> pog.execute(tx)
       |> result.map(fn(_) { Nil })
       |> result.map_error(fn(error) {
         eventsourcing.EventStoreError(
@@ -366,7 +369,7 @@ fn metadata_encoder(metadata: Metadata) -> String {
 
 fn load_snapshot(
   postgres_store: PostgresStore(entity, command, event, error),
-  tx: eventsourcing.TransactionHandle(pog.Connection),
+  tx: pog.Connection,
   aggregate_id: eventsourcing.AggregateId,
 ) -> Result(
   Option(eventsourcing.Snapshot(entity)),
@@ -395,7 +398,7 @@ fn load_snapshot(
   |> pog.parameter(pog.text(postgres_store.aggregate_type))
   |> pog.parameter(pog.text(aggregate_id))
   |> pog.returning(row_decoder)
-  |> pog.execute(tx.context)
+  |> pog.execute(tx)
   |> result.map(fn(response) {
     case response.rows {
       [] -> None
@@ -411,7 +414,7 @@ fn load_snapshot(
 
 fn save_snapshot(
   postgres_store: PostgresStore(entity, command, event, error),
-  tx: eventsourcing.TransactionHandle(pog.Connection),
+  tx: pog.Connection,
   snapshot: eventsourcing.Snapshot(entity),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
   let eventsourcing.Snapshot(aggregate_id, entity, sequence, timestamp) =
@@ -423,7 +426,7 @@ fn save_snapshot(
   |> pog.parameter(pog.int(sequence))
   |> pog.parameter(pog.text(postgres_store.entity_encoder(entity)))
   |> pog.parameter(pog.int(timestamp))
-  |> pog.execute(tx.context)
+  |> pog.execute(tx)
   |> result.map(fn(_) { Nil })
   |> result.map_error(fn(error) {
     eventsourcing.EventStoreError(
@@ -456,4 +459,16 @@ pub fn create_event_table(
       "Failed to create snapshot table: " <> pprint.format(error),
     )
   })
+}
+
+fn execute_in_transaction(db) {
+  fn(f) {
+    let f = fn(db) {
+      f(db) |> result.map_error(fn(error) { string.inspect(error) })
+    }
+    pog.transaction(db, f)
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(string.inspect(error))
+    })
+  }
 }
