@@ -1,7 +1,6 @@
 import eventsourcing
 import eventsourcing_postgres
 import example_bank_account
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/task
@@ -321,7 +320,7 @@ fn snapshot_concurrent_updates(event_sourcing) {
         eventsourcing.execute_with_metadata(
           event_sourcing,
           account_id,
-          example_bank_account.DepositMoney(1.0),
+          example_bank_account.WithDrawMoney(1.0),
           [#("concurrent_operation", string.inspect(i))],
         )
       })
@@ -331,11 +330,8 @@ fn snapshot_concurrent_updates(event_sourcing) {
   // Load events to verify they were all recorded
   eventsourcing.load_events(event_sourcing, account_id)
   |> should.be_ok
-  |> fn(events) {
-    events
-    |> list.length
-    |> should.equal(100)
-  }
+  |> list.length
+  |> should.equal(201)
   // Verify final state
   eventsourcing.get_latest_snapshot(event_sourcing, account_id)
   |> should.be_ok
@@ -343,7 +339,7 @@ fn snapshot_concurrent_updates(event_sourcing) {
     let assert Some(eventsourcing.Snapshot(_, entity, sequence, _)) = snapshot
     let assert example_bank_account.BankAccount(opened: True, balance: 0.0) =
       entity
-    sequence |> should.equal(3)
+    sequence |> should.equal(201)
   }
 }
 
