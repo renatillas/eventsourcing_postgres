@@ -5,7 +5,7 @@ version = "5.1.0"
 # your project to the Hex package manager.
 #
 description = "Postgres event store for the Eventsourcing library"
-licences = ["Apache-2.0"]
+licences = ["MIT"]
 repository = { type = "github", user = "renatillas", repo = "eventsourcing_postgres" }
 
 # For a full reference of all the available options, you can have a look at
