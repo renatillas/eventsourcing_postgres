@@ -8,7 +8,6 @@ import gleam/pair
 import gleam/result
 import gleam/string
 import pog
-import pprint
 
 // CONSTANTS ----
 
@@ -127,36 +126,14 @@ pub fn new(
     eventstore:,
     load_events: fn(postgres_store, tx, aggregate_id, start_from) {
       load_events(postgres_store, tx, aggregate_id, start_from)
-      |> result.map_error(fn(error) {
-        eventsourcing.EventStoreError(
-          "Failed to load events: " <> string.inspect(error),
-        )
-      })
     },
     commit_events: fn(tx, aggregate_id, events, metadata) {
       commit_events(eventstore, tx, aggregate_id, events, metadata)
-      |> result.map_error(fn(error) {
-        eventsourcing.EventStoreError(
-          "Failed to commit events: " <> string.inspect(error),
-        )
-      })
     },
     load_snapshot: fn(tx, aggregate_id) {
       load_snapshot(eventstore, tx, aggregate_id)
-      |> result.map_error(fn(error) {
-        eventsourcing.EventStoreError(
-          "Failed to load snapshot: " <> string.inspect(error),
-        )
-      })
     },
-    save_snapshot: fn(tx, snapshot) {
-      save_snapshot(eventstore, tx, snapshot)
-      |> result.map_error(fn(error) {
-        eventsourcing.EventStoreError(
-          "Failed to save snapshot: " <> string.inspect(error),
-        )
-      })
-    },
+    save_snapshot: fn(tx, snapshot) { save_snapshot(eventstore, tx, snapshot) },
     execute_transaction: execute_in_transaction(db),
     load_aggregate_transaction: execute_in_transaction(db),
     get_latest_snapshot_transaction: execute_in_transaction(db),
@@ -178,7 +155,7 @@ fn load_events(
     |> pog.execute(tx)
     |> result.map_error(fn(error) {
       eventsourcing.EventStoreError(
-        "Failed to set isolation level: " <> pprint.format(error),
+        "Failed to set isolation level: " <> string.inspect(error),
       )
     }),
   )
@@ -216,7 +193,7 @@ fn load_events(
   |> result.map(fn(response) { response.rows })
   |> result.map_error(fn(error) {
     eventsourcing.EventStoreError(
-      "Failed to query events: " <> pprint.format(error),
+      "Failed to query events: " <> string.inspect(error),
     )
   })
 }
@@ -353,7 +330,7 @@ fn persist_events(
       |> result.map(fn(_) { Nil })
       |> result.map_error(fn(error) {
         eventsourcing.EventStoreError(
-          "Failed to insert events: " <> pprint.format(error),
+          "Failed to insert events: " <> string.inspect(error),
         )
       })
     }
@@ -407,7 +384,7 @@ fn load_snapshot(
   })
   |> result.map_error(fn(error) {
     eventsourcing.EventStoreError(
-      "Failed to load snapshot: " <> pprint.format(error),
+      "Failed to load snapshot: " <> string.inspect(error),
     )
   })
 }
@@ -430,7 +407,7 @@ fn save_snapshot(
   |> result.map(fn(_) { Nil })
   |> result.map_error(fn(error) {
     eventsourcing.EventStoreError(
-      "Failed to save snapshot: " <> pprint.format(pprint.format(error)),
+      "Failed to save snapshot: " <> string.inspect(error),
     )
   })
 }
@@ -443,7 +420,7 @@ pub fn create_snapshot_table(
   |> result.map(fn(_) { Nil })
   |> result.map_error(fn(error) {
     eventsourcing.EventStoreError(
-      "Failed to create snapshot table: " <> pprint.format(error),
+      "Failed to create snapshot table: " <> string.inspect(error),
     )
   })
 }
@@ -456,7 +433,7 @@ pub fn create_event_table(
   |> result.map(fn(_) { Nil })
   |> result.map_error(fn(error) {
     eventsourcing.EventStoreError(
-      "Failed to create snapshot table: " <> pprint.format(error),
+      "Failed to create snapshot table: " <> string.inspect(error),
     )
   })
 }
