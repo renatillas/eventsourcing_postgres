@@ -46,6 +46,48 @@
 - **Type-safe Error Handling**: Comprehensive error types and Result-based API.
 - **Concurrency Safe**: Uses pessimistic concurrency to ensure safe concurrent access.
 
+## Example
+
+```gleam
+import gleam/io
+import eventsourcing_postgres
+import eventsourcing 
+
+// First we would define the pog config and all the necessary values for the event sourcing system
+
+let pog_actor_spec = pgo_config
+|> pog.supervised()
+
+
+use _ <- result.try(
+  supervisor.new(supervisor.OneForOne)
+  |> supervisor.add(pog_actor_spec)
+  |> supervisor.start()
+)
+
+
+let postgres_store = eventsourcing_postgres.new(
+  pgo_config 
+  event_encoder 
+  event_decoder 
+  event_type 
+  event_version 
+  aggregate_type 
+  entity_encoder 
+  entity_decoder 
+) 
+
+let event_sourcing = 
+  eventsourcing.new(
+    event_store: postgres_store,
+    queries: [query],
+    handle: handle,
+    apply: apply,
+    empty_state: emtpy_state,
+  )
+
+```
+
 ## Concurrency Safety
 
 ### What is Pessimistic Concurrency?

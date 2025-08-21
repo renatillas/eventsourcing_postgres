@@ -4,6 +4,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None}
+import gleam/otp/supervision
 import gleam/pair
 import gleam/result
 import gleam/string
@@ -108,8 +109,7 @@ pub fn new(
   error,
   pog.Connection,
 ) {
-  let db = pog.connect(pgo_config)
-
+  let db = pog.named_connection(pgo_config.pool_name)
   let eventstore =
     PostgresStore(
       db:,
@@ -127,8 +127,8 @@ pub fn new(
     load_events: fn(postgres_store, tx, aggregate_id, start_from) {
       load_events(postgres_store, tx, aggregate_id, start_from)
     },
-    commit_events: fn(tx, aggregate_id, events, metadata) {
-      commit_events(eventstore, tx, aggregate_id, events, metadata)
+    commit_events: fn(tx, aggregate, events, metadata) {
+      commit_events(eventstore, tx, aggregate, events, metadata)
     },
     load_snapshot: fn(tx, aggregate_id) {
       load_snapshot(eventstore, tx, aggregate_id)
