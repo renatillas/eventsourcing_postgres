@@ -4,7 +4,6 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None}
-import gleam/otp/supervision
 import gleam/pair
 import gleam/result
 import gleam/string
