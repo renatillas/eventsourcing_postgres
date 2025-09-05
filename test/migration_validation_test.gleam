@@ -3,10 +3,12 @@ import eventsourcing_postgres
 import example_bank_account
 import gleam/dynamic/decode
 import gleam/erlang/process
+import gleam/list
 import gleam/option.{Some}
 import gleam/otp/static_supervisor
 import gleeunit
 import pog
+import taskle
 
 pub fn main() {
   gleeunit.main()
@@ -227,11 +229,11 @@ pub fn test_new_table_vs_legacy_test() {
 }
 
 fn setup_test_store(test_name: String) {
-  let database_name = "eventsourcing_postgres_test" <> test_name
+  let database_name = "migration_" <> test_name
   let pog_config =
     pog.Config(
       ..pog.default_config(process.new_name(
-        "migration_validation_" <> test_name,
+        "migration_validation_" <> test_name <> "_setup",
       )),
       password: option.Some("postgres"),
       pool_size: 1,
@@ -313,6 +315,76 @@ fn clean_tables(connection) {
   let _ = pog.query("DELETE FROM event;") |> pog.execute(connection)
   let _ = pog.query("DELETE FROM snapshot;") |> pog.execute(connection)
   Nil
+}
+
+pub fn test_concurrent_migration_safety_test() {
+  let postgres_store = setup_test_store("concurrent_migration")
+
+  let _ =
+    pog.query("DROP TABLE IF EXISTS event CASCADE;")
+    |> pog.execute(postgres_store.eventstore.db)
+  let _ =
+    pog.query("DROP TABLE IF EXISTS snapshot CASCADE;")
+    |> pog.execute(postgres_store.eventstore.db)
+
+  let assert Ok(_) =
+    eventsourcing_postgres.create_event_table_legacy(postgres_store.eventstore)
+  let assert Ok(_) =
+    eventsourcing_postgres.create_snapshot_table_legacy(
+      postgres_store.eventstore,
+    )
+
+  clean_tables(postgres_store.eventstore.db)
+
+  let event_sourcing = create_event_sourcing(postgres_store)
+
+  eventsourcing.execute(
+    event_sourcing,
+    "concurrent-migration-test",
+    example_bank_account.OpenAccount("concurrent-migration-test"),
+  )
+
+  process.sleep(20)
+
+  let initial_count = count_events(postgres_store.eventstore.db)
+  assert initial_count == 1
+
+  // Test concurrent migrations - they should be safe and idempotent
+  let migration_tasks =
+    list.range(1, 5)
+    |> list.map(fn(_i) {
+      taskle.async(fn() {
+        let _ =
+          eventsourcing_postgres.migrate_event_table_to_jsonb(
+            postgres_store.eventstore,
+          )
+        let _ =
+          eventsourcing_postgres.migrate_snapshot_table_to_jsonb(
+            postgres_store.eventstore,
+          )
+        Ok(Nil)
+      })
+    })
+
+  let _ = taskle.try_await_all(migration_tasks, 5000)
+
+  // Verify data integrity after concurrent migrations
+  let final_count = count_events(postgres_store.eventstore.db)
+  assert final_count == 1
+
+  // Verify we can still add new events after migration
+  eventsourcing.execute(
+    event_sourcing,
+    "concurrent-migration-test",
+    example_bank_account.DepositMoney(100.0),
+  )
+
+  process.sleep(20)
+
+  let post_migration_count = count_events(postgres_store.eventstore.db)
+  assert post_migration_count == 2
+
+  clean_tables(postgres_store.eventstore.db)
 }
 
 fn create_database(connection, db_name) {

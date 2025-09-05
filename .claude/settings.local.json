@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(/Users/renata-amutio/Projects/renatillas/eventsourcing/src/**)",
+      "Read(/Users/renata-amutio/Projects/renatillas/eventsourcing/src/**)",
+      "Read(/Users/renata-amutio/Projects/renatillas/eventsourcing/src/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -25,7 +25,6 @@
 
 - [Introduction](#introduction)
 - [Features](#features)
-- [Concurrency Safety](#concurrency-safety)
 - [Philosophy](#philosophy)
 - [Installation](#installation)
 - [Support](#support)
@@ -91,15 +90,58 @@ let event_sourcing =
 
 ```
 
-## Concurrency Safety
+## CLI Database Management
 
-### What is Pessimistic Concurrency?
+The library includes a powerful CLI for managing your PostgreSQL event store:
 
-Pessimistic concurrency is a method of managing concurrent access to a resource by locking it when a transaction is being performed. This ensures that no other transaction can modify the resource until the lock is released.
+### Quick Setup
 
-### Why is it Important?
+```sh
+# Create tables with JSONB columns (recommended for new projects)
+gleam run create-tables
 
-In the context of event sourcing, multiple transactions could attempt to modify the same aggregate simultaneously. Without proper concurrency control, this could lead to inconsistencies in the stored events. Pessimistic concurrency ensures that only one transaction can modify an aggregate at any given time, preserving data integrity and consistency.
+# Create legacy TEXT tables (for backward compatibility)
+gleam run create-legacy-tables
+```
+
+### Migration Commands
+
+```sh
+# Migrate existing TEXT tables to JSONB (safe, keeps old columns)
+gleam run migrate-only
+
+# Finalize migration (removes old TEXT columns - backup first!)
+gleam run finalize-migration  
+
+# Complete migration in one step
+gleam run migrate
+```
+
+### Configuration
+
+Configure database connection using environment variables or `.env` file:
+
+```sh
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DATABASE=myapp
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+```
+
+### Examples
+
+```sh
+# Use with custom database
+POSTGRES_DATABASE=production gleam run create-tables
+
+# Migrate production data safely
+POSTGRES_DATABASE=production gleam run migrate-only
+# ... verify migration success ...
+POSTGRES_DATABASE=production gleam run finalize-migration
+```
+
+For detailed migration information, see [MIGRATION.md](MIGRATION.md).
 
 ## Philosophy
 

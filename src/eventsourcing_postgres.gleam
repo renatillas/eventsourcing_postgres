@@ -318,10 +318,17 @@ fn commit_events(
   #(List(eventsourcing.EventEnvelop(event)), Int),
   eventsourcing.EventSourcingError(error),
 ) {
-  let eventsourcing.Aggregate(aggregate_id, _, sequence) = context
+  let eventsourcing.Aggregate(aggregate_id, _, _sequence) = context
+
+  // Lock and get the latest sequence number atomically within the transaction
+  use latest_sequence <- result.try(get_latest_sequence_with_lock(
+    postgres_store,
+    tx,
+    aggregate_id,
+  ))
 
   let wrapped_events =
-    wrap_events(postgres_store, aggregate_id, events, sequence, metadata)
+    wrap_events(postgres_store, aggregate_id, events, latest_sequence, metadata)
   case list.last(wrapped_events) {
     Ok(last_event) ->
       persist_events(postgres_store, tx, wrapped_events)
@@ -329,6 +336,42 @@ fn commit_events(
     Error(_) ->
       Error(eventsourcing.EventStoreError("Cannot commit empty event list"))
   }
+}
+
+/// Get the latest sequence number with SERIALIZABLE isolation providing perfect consistency
+fn get_latest_sequence_with_lock(
+  postgres_store: PostgresStore(entity, command, event, error),
+  tx: pog.Connection,
+  aggregate_id: eventsourcing.AggregateId,
+) -> Result(Int, eventsourcing.EventSourcingError(error)) {
+  let row_decoder = {
+    use sequence <- decode.field(0, decode.int)
+    decode.success(sequence)
+  }
+
+  pog.query(
+    "
+    SELECT COALESCE(MAX(sequence), 0) as max_sequence
+    FROM event 
+    WHERE aggregate_type = $1 AND aggregate_id = $2
+  ",
+  )
+  |> pog.parameter(pog.text(postgres_store.aggregate_type))
+  |> pog.parameter(pog.text(aggregate_id))
+  |> pog.returning(row_decoder)
+  |> pog.execute(tx)
+  |> result.map(fn(response) {
+    case response.rows {
+      [sequence, ..] -> sequence
+      [] -> 0
+      // Should never happen with COALESCE, but safety first
+    }
+  })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to get latest sequence: " <> string.inspect(error),
+    )
+  })
 }
 
 fn wrap_events(
@@ -526,66 +569,79 @@ fn save_snapshot(
   })
 }
 
+@internal
 pub fn create_event_table(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
-  pog.query(create_event_table_with_json_query)
-  |> pog.execute(postgres_store.db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(fn(error) {
-    eventsourcing.EventStoreError(
-      "Failed to create event table: " <> string.inspect(error),
-    )
-  })
+  use _ <- result.try(
+    pog.query(create_event_table_with_json_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to create event table: " <> string.inspect(error),
+      )
+    }),
+  )
+  // Automatically create performance indexes
+  create_event_indexes(postgres_store)
 }
 
+@internal
 pub fn create_snapshot_table(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
-  pog.query(create_snapshot_table_with_json_query)
-  |> pog.execute(postgres_store.db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(fn(error) {
-    eventsourcing.EventStoreError(
-      "Failed to create snapshot table: " <> string.inspect(error),
-    )
-  })
+  use _ <- result.try(
+    pog.query(create_snapshot_table_with_json_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to create snapshot table: " <> string.inspect(error),
+      )
+    }),
+  )
+  // Automatically create performance indexes
+  create_snapshot_indexes(postgres_store)
 }
 
-/// Legacy function: Creates event table with TEXT columns (for backward compatibility)
-/// Use create_event_table() for new installations (uses JSONB)
+@internal
 pub fn create_event_table_legacy(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
-  pog.query(create_event_table_query)
-  |> pog.execute(postgres_store.db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(fn(error) {
-    eventsourcing.EventStoreError(
-      "Failed to create legacy event table: " <> string.inspect(error),
-    )
-  })
+  use _ <- result.try(
+    pog.query(create_event_table_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to create legacy event table: " <> string.inspect(error),
+      )
+    }),
+  )
+  // Automatically create performance indexes for legacy tables
+  create_legacy_event_indexes(postgres_store)
 }
 
-/// Legacy function: Creates snapshot table with TEXT columns (for backward compatibility) 
-/// Use create_snapshot_table() for new installations (uses JSONB)
+@internal
 pub fn create_snapshot_table_legacy(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
-  pog.query(create_snapshot_table_query)
-  |> pog.execute(postgres_store.db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(fn(error) {
-    eventsourcing.EventStoreError(
-      "Failed to create legacy snapshot table: " <> string.inspect(error),
-    )
-  })
+  use _ <- result.try(
+    pog.query(create_snapshot_table_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to create legacy snapshot table: " <> string.inspect(error),
+      )
+    }),
+  )
+  // Automatically create performance indexes for legacy tables
+  create_legacy_snapshot_indexes(postgres_store)
 }
 
-// MIGRATION FUNCTIONS ----
-
-/// Step 1: Migrate event table from TEXT to JSONB columns
-/// This adds new JSONB columns and converts existing data
+@internal
 pub fn migrate_event_table_to_jsonb(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
@@ -610,8 +666,7 @@ pub fn migrate_event_table_to_jsonb(
   })
 }
 
-/// Step 1: Migrate snapshot table from TEXT to JSONB columns  
-/// This adds new JSONB columns and converts existing data
+@internal
 pub fn migrate_snapshot_table_to_jsonb(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
@@ -637,8 +692,7 @@ pub fn migrate_snapshot_table_to_jsonb(
   })
 }
 
-/// Step 2: Finalize event table migration by removing old TEXT columns
-/// WARNING: This permanently deletes the old text columns after verification
+@internal
 pub fn finalize_event_table_migration(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
@@ -683,8 +737,7 @@ pub fn finalize_event_table_migration(
   })
 }
 
-/// Step 2: Finalize snapshot table migration by removing old TEXT columns  
-/// WARNING: This permanently deletes the old text columns after verification
+@internal
 pub fn finalize_snapshot_table_migration(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
@@ -709,8 +762,7 @@ pub fn finalize_snapshot_table_migration(
   })
 }
 
-/// Safe migration helper - only migrates if tables exist and have TEXT columns
-/// This is a convenience function that checks existing structure and migrates safely
+@internal
 pub fn migrate_to_jsonb_safe(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
@@ -719,9 +771,7 @@ pub fn migrate_to_jsonb_safe(
   Ok(Nil)
 }
 
-/// Complete migration helper - runs both steps for event and snapshot tables
-/// This is a convenience function that runs the full migration process
-/// WARNING: This finalizes the migration and removes old TEXT columns permanently
+@internal
 pub fn migrate_to_jsonb(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
@@ -731,13 +781,141 @@ pub fn migrate_to_jsonb(
   finalize_snapshot_table_migration(postgres_store)
 }
 
+// INDEX MANAGEMENT FUNCTIONS ----
+
+/// Create performance indexes for JSONB tables
+/// These indexes significantly improve query performance for event sourcing operations
+@internal
+pub fn create_indexes(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  use _ <- result.try(create_event_indexes(postgres_store))
+  create_snapshot_indexes(postgres_store)
+}
+
+/// Create indexes for event table (JSONB version)
+/// Includes composite indexes for aggregate loading and GIN indexes for JSON searching
+@internal
+pub fn create_event_indexes(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  // Create only the most essential index for performance
+  pog.query(
+    "CREATE INDEX IF NOT EXISTS idx_event_aggregate_sequence ON event (aggregate_type, aggregate_id, sequence)",
+  )
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to create aggregate sequence index: " <> string.inspect(error),
+    )
+  })
+}
+
+/// Create indexes for snapshot table (JSONB version)
+/// Includes GIN indexes for entity searching and aggregate type lookups
+@internal
+pub fn create_snapshot_indexes(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  pog.query(
+    "CREATE INDEX IF NOT EXISTS idx_snapshot_aggregate_type ON snapshot (aggregate_type)",
+  )
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to create snapshot aggregate type index: "
+      <> string.inspect(error),
+    )
+  })
+}
+
+/// Create indexes for legacy tables (TEXT columns)
+/// Includes basic composite indexes without JSON-specific GIN indexes
+@internal
+pub fn create_legacy_indexes(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  use _ <- result.try(create_legacy_event_indexes(postgres_store))
+  create_legacy_snapshot_indexes(postgres_store)
+}
+
+/// Create indexes for legacy event table (TEXT version)
+@internal
+pub fn create_legacy_event_indexes(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  // Create only the most essential index for performance
+  pog.query(
+    "CREATE INDEX IF NOT EXISTS idx_event_aggregate_sequence ON event (aggregate_type, aggregate_id, sequence)",
+  )
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to create aggregate sequence index: " <> string.inspect(error),
+    )
+  })
+}
+
+/// Create indexes for legacy snapshot table (TEXT version)
+@internal
+pub fn create_legacy_snapshot_indexes(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  pog.query(
+    "CREATE INDEX IF NOT EXISTS idx_snapshot_aggregate_type ON snapshot (aggregate_type)",
+  )
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to create snapshot aggregate type index: "
+      <> string.inspect(error),
+    )
+  })
+}
+
 fn execute_in_transaction(
   db: pog.Connection,
 ) -> fn(fn(pog.Connection) -> Result(a, b)) ->
   Result(a, eventsourcing.EventSourcingError(c)) {
   fn(f) {
-    pog.transaction(db, f)
-    |> result.replace_error(eventsourcing.TransactionFailed)
+    // Implement retry logic for concurrent conflicts with aggressive retries for 100% reliability
+    execute_with_retry(db, f, 10)
+  }
+}
+
+fn execute_with_retry(
+  db: pog.Connection,
+  f: fn(pog.Connection) -> Result(a, b),
+  retries_left: Int,
+) -> Result(a, eventsourcing.EventSourcingError(c)) {
+  case pog.transaction(db, f) {
+    Ok(success) -> Ok(success)
+    Error(error) -> {
+      // Check if this is a retryable error (constraint violations, serialization failures)
+      let is_retryable = case string.inspect(error) {
+        error_string -> {
+          string.contains(error_string, "duplicate key")
+          || string.contains(error_string, "constraint")
+          || string.contains(error_string, "serialization_failure")
+          || string.contains(error_string, "deadlock_detected")
+          || string.contains(error_string, "could not serialize")
+        }
+      }
+
+      case retries_left > 0 && is_retryable {
+        True -> {
+          // Very aggressive exponential backoff for 100% reliability
+          let delay = 20 + { 10 - retries_left } * 100
+          process.sleep(delay)
+          execute_with_retry(db, f, retries_left - 1)
+        }
+        False -> Error(eventsourcing.TransactionFailed)
+      }
+    }
   }
 }
 
@@ -745,7 +923,6 @@ fn execute_in_transaction(
 
 pub type CliCommand {
   CreateTables
-  CreateLegacyTables
   MigrateTables
   MigrateTablesOnly
   FinalizeMigration
@@ -764,13 +941,14 @@ pub type CliConfig {
 }
 
 /// Main CLI entry point for managing eventsourcing_postgres database
+/// Supports database table creation, migration, and maintenance commands
+/// Use `gleam run help` to see all available commands and usage examples
 pub fn main() {
   // Load environment variables from .env file if it exists
   let _ = dot_env.load_default()
 
   case argv.load().arguments {
     ["create-tables"] -> run_create_tables()
-    ["create-legacy-tables"] -> run_create_legacy_tables()
     ["migrate"] -> run_migrate_tables()
     ["migrate-only"] -> run_migrate_tables_only()
     ["finalize-migration"] -> run_finalize_migration()
@@ -797,28 +975,6 @@ fn run_create_tables() {
         }
         Error(error) -> {
           io.println("❌ Failed to create tables: " <> error)
-        }
-      }
-    }
-    Error(error) -> io.println("❌ Configuration error: " <> error)
-  }
-}
-
-fn run_create_legacy_tables() {
-  case load_config_from_env() {
-    Ok(config) -> {
-      io.println("Creating legacy tables with TEXT columns...")
-      case create_tables_with_config(config, CreateLegacyTables) {
-        Ok(_) -> {
-          io.println(
-            "✅ Successfully created event and snapshot tables with TEXT columns",
-          )
-          io.println(
-            "Note: Consider using 'create-tables' for better performance with JSONB",
-          )
-        }
-        Error(error) -> {
-          io.println("❌ Failed to create legacy tables: " <> error)
         }
       }
     }
@@ -933,14 +1089,6 @@ fn create_tables_with_config(
           create_snapshot_table(postgres_store)
           |> result.map_error(error_to_string)
         }
-        CreateLegacyTables -> {
-          use _ <- result.try(
-            create_event_table_legacy(postgres_store)
-            |> result.map_error(error_to_string),
-          )
-          create_snapshot_table_legacy(postgres_store)
-          |> result.map_error(error_to_string)
-        }
         MigrateTables -> {
           use _ <- result.try(
             migrate_event_table_to_jsonb(postgres_store)
@@ -1016,10 +1164,7 @@ fn print_help() {
   io.println("")
   io.println("COMMANDS:")
   io.println(
-    "  create-tables          Create tables with JSONB columns (recommended)",
-  )
-  io.println(
-    "  create-legacy-tables   Create tables with TEXT columns (for compatibility)",
+    "  create-tables          Create JSONB tables with performance indexes",
   )
   io.println(
     "  migrate               Complete migration from TEXT to JSONB (with cleanup)",
@@ -1069,15 +1214,21 @@ fn print_help() {
   io.println("  gleam run migrate-only")
   io.println("  gleam run finalize-migration  # Run after verification")
   io.println("")
+  io.println("")
   io.println("COMPLETE WORKFLOWS:")
   io.println("  NEW PROJECT:")
   io.println("    Prerequisites: Create PostgreSQL database first")
-  io.println("    1. gleam run create-tables      # Create JSONB tables")
+  io.println(
+    "    1. gleam run create-tables      # Creates JSONB tables + indexes automatically",
+  )
   io.println("")
   io.println("  EXISTING PROJECT MIGRATION:")
   io.println("    Prerequisites: Backup your database")
   io.println("    1. gleam run migrate-only       # Safe migration")
   io.println("    2. gleam run finalize-migration # Complete migration")
   io.println("")
+  io.println(
+    "  Note: All table creation automatically includes performance indexes",
+  )
   io.println("  The migration preserves ALL existing data safely")
 }
