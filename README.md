@@ -99,9 +99,6 @@ The library includes a powerful CLI for managing your PostgreSQL event store:
 ```sh
 # Create tables with JSONB columns (recommended for new projects)
 gleam run create-tables
-
-# Create legacy TEXT tables (for backward compatibility)
-gleam run create-legacy-tables
 ```
 
 ### Migration Commands
