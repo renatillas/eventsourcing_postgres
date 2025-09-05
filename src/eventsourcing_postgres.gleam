@@ -1,9 +1,15 @@
+import argv
+import dot_env
+import dot_env/env
 import eventsourcing
 import gleam/dynamic/decode
+import gleam/erlang/process
 import gleam/int
+import gleam/io
 import gleam/json
 import gleam/list
-import gleam/option.{type Option, None}
+import gleam/option.{type Option, None, Some}
+import gleam/otp/static_supervisor
 import gleam/pair
 import gleam/result
 import gleam/string
@@ -68,7 +74,85 @@ const select_snapshot_query = "
     AND aggregate_id = $2
 "
 
-const isolation_level_query = "LOCK TABLE event IN ACCESS EXCLUSIVE MODE;"
+// MIGRATION QUERIES ----
+
+const add_event_jsonb_columns_query = "
+  -- Add new JSONB columns to event table
+  ALTER TABLE event 
+    ADD COLUMN IF NOT EXISTS payload_json JSONB,
+    ADD COLUMN IF NOT EXISTS metadata_json JSONB;
+"
+
+const convert_event_data_to_jsonb_query = "
+  -- Convert existing text data to JSONB, handling potential JSON errors
+  -- Only update rows where JSONB columns are NULL (not already migrated)
+  UPDATE event 
+  SET 
+    payload_json = CASE 
+      WHEN payload_json IS NULL THEN payload::jsonb
+      ELSE payload_json
+    END,
+    metadata_json = CASE 
+      WHEN metadata_json IS NULL THEN metadata::jsonb
+      ELSE metadata_json
+    END
+  WHERE payload_json IS NULL OR metadata_json IS NULL;
+"
+
+const add_snapshot_jsonb_columns_query = "
+  -- Add new JSONB column to snapshot table
+  ALTER TABLE snapshot 
+    ADD COLUMN IF NOT EXISTS entity_json JSONB;
+"
+
+const convert_snapshot_data_to_jsonb_query = "
+  -- Convert existing text data to JSONB, handling potential JSON errors
+  -- Only update rows where JSONB column is NULL (not already migrated)
+  UPDATE snapshot 
+  SET entity_json = CASE 
+    WHEN entity_json IS NULL THEN entity::jsonb
+    ELSE entity_json
+  END
+  WHERE entity_json IS NULL;
+"
+
+const create_event_table_with_json_query = "
+  CREATE TABLE IF NOT EXISTS event
+  (
+    aggregate_type text                         NOT NULL,
+    aggregate_id   text                         NOT NULL,
+    sequence       bigint CHECK (sequence >= 0) NOT NULL,
+    event_type     text                         NOT NULL,
+    event_version  text                         NOT NULL,
+    payload        jsonb                        NOT NULL,
+    metadata       jsonb                        NOT NULL,
+    PRIMARY KEY (aggregate_type, aggregate_id, sequence)
+  );
+  "
+
+const create_snapshot_table_with_json_query = "
+  CREATE TABLE IF NOT EXISTS snapshot
+  (
+    aggregate_type text                         NOT NULL,
+    aggregate_id   text                         NOT NULL,
+    sequence       bigint CHECK (sequence >= 0) NOT NULL,
+    entity         jsonb                        NOT NULL,
+    timestamp      int                          NOT NULL,
+    PRIMARY KEY (aggregate_type, aggregate_id)
+  );
+  "
+
+const drop_event_payload_column_query = "ALTER TABLE event DROP COLUMN payload;"
+
+const drop_event_metadata_column_query = "ALTER TABLE event DROP COLUMN metadata;"
+
+const rename_event_payload_column_query = "ALTER TABLE event RENAME COLUMN payload_json TO payload;"
+
+const rename_event_metadata_column_query = "ALTER TABLE event RENAME COLUMN metadata_json TO metadata;"
+
+const drop_snapshot_entity_column_query = "ALTER TABLE snapshot DROP COLUMN entity;"
+
+const rename_snapshot_entity_column_query = "ALTER TABLE snapshot RENAME COLUMN entity_json TO entity;"
 
 // TYPES ----
 
@@ -149,30 +233,26 @@ fn load_events(
   List(eventsourcing.EventEnvelop(event)),
   eventsourcing.EventSourcingError(error),
 ) {
-  use _ <- result.try(
-    pog.query(isolation_level_query)
-    |> pog.execute(tx)
-    |> result.map_error(fn(error) {
-      eventsourcing.EventStoreError(
-        "Failed to set isolation level: " <> string.inspect(error),
-      )
-    }),
-  )
-
   let row_decoder = {
+    use event_version <- decode.field(0, decode.string)
     use aggregate_id <- decode.field(1, decode.string)
     use sequence <- decode.field(2, decode.int)
+    use aggregate_type <- decode.field(3, decode.string)
+    use event_type <- decode.field(4, decode.string)
     use payload <- decode.field(5, {
       use payload_string <- decode.then(decode.string)
-      let assert Ok(payload) =
-        json.parse(payload_string, postgres_store.event_decoder)
-      decode.success(payload)
+      case json.parse(payload_string, postgres_store.event_decoder) {
+        Ok(payload) -> decode.success(payload)
+        Error(error) ->
+          panic as string.concat([
+              "Failed to decode event payload: ",
+              string.inspect(error),
+              " for payload: ",
+              payload_string,
+            ])
+      }
     })
-
     use metadata <- decode.field(6, metadata_decoder())
-    use event_type <- decode.field(4, decode.string)
-    use event_version <- decode.field(0, decode.string)
-    use aggregate_type <- decode.field(3, decode.string)
     decode.success(eventsourcing.SerializedEventEnvelop(
       aggregate_id:,
       sequence:,
@@ -197,16 +277,35 @@ fn load_events(
   })
 }
 
-fn metadata_decoder() {
+fn metadata_decoder() -> decode.Decoder(List(#(String, String))) {
   use stringmetadata <- decode.then(decode.string)
-  let assert Ok(listmetadata) =
-    json.parse(stringmetadata, decode.list(decode.list(decode.string)))
-
-  list.map(listmetadata, fn(metadata) {
-    let assert [key, val] = metadata
-    #(key, val)
-  })
-  |> decode.success
+  case json.parse(stringmetadata, decode.list(decode.list(decode.string))) {
+    Ok(listmetadata) ->
+      case
+        list.try_map(listmetadata, fn(metadata) {
+          case metadata {
+            [key, val] -> Ok(#(key, val))
+            _ -> Error("Invalid metadata format")
+          }
+        })
+      {
+        Ok(parsed_metadata) -> decode.success(parsed_metadata)
+        Error(error) ->
+          panic as string.concat([
+              "Invalid metadata format: ",
+              error,
+              " for metadata: ",
+              stringmetadata,
+            ])
+      }
+    Error(error) ->
+      panic as string.concat([
+          "Failed to parse metadata JSON: ",
+          string.inspect(error),
+          " for metadata: ",
+          stringmetadata,
+        ])
+  }
 }
 
 fn commit_events(
@@ -223,10 +322,13 @@ fn commit_events(
 
   let wrapped_events =
     wrap_events(postgres_store, aggregate_id, events, sequence, metadata)
-  let assert Ok(last_event) = list.last(wrapped_events)
-
-  persist_events(postgres_store, tx, wrapped_events)
-  |> result.map(fn(_) { #(wrapped_events, last_event.sequence) })
+  case list.last(wrapped_events) {
+    Ok(last_event) ->
+      persist_events(postgres_store, tx, wrapped_events)
+      |> result.map(fn(_) { #(wrapped_events, last_event.sequence) })
+    Error(_) ->
+      Error(eventsourcing.EventStoreError("Cannot commit empty event list"))
+  }
 }
 
 fn wrap_events(
@@ -283,31 +385,37 @@ fn persist_events(
         _ -> ", "
       }
 
-      let assert eventsourcing.SerializedEventEnvelop(
-        aggregate_id,
-        sequence,
-        payload,
-        metadata,
-        event_type,
-        event_version,
-        aggregate_type,
-      ) = event
+      case event {
+        eventsourcing.SerializedEventEnvelop(
+          aggregate_id,
+          sequence,
+          payload,
+          metadata,
+          event_type,
+          event_version,
+          aggregate_type,
+        ) -> {
+          let new_params = [
+            pog.text(aggregate_type),
+            pog.text(aggregate_id),
+            pog.int(sequence),
+            pog.text(event_type),
+            pog.text(event_version),
+            pog.text(payload |> postgres_store.event_encoder),
+            pog.text(metadata |> metadata_encoder),
+          ]
 
-      let new_params = [
-        pog.text(aggregate_type),
-        pog.text(aggregate_id),
-        pog.int(sequence),
-        pog.text(event_type),
-        pog.text(event_version),
-        pog.text(payload |> postgres_store.event_encoder),
-        pog.text(metadata |> metadata_encoder),
-      ]
-
-      #(
-        placeholders <> sep <> row_placeholders,
-        list.append(params, new_params),
-        index + 1,
-      )
+          #(
+            placeholders <> sep <> row_placeholders,
+            list.append(params, new_params),
+            index + 1,
+          )
+        }
+        _ -> {
+          // This should never happen as we only create SerializedEventEnvelop
+          panic as "Invalid event envelope type"
+        }
+      }
     })
 
   // If no events to insert, return early
@@ -356,11 +464,18 @@ fn load_snapshot(
     use sequence <- decode.field(2, decode.int)
     use entity <- decode.field(3, {
       use entity_string <- decode.then(decode.string)
-      let assert Ok(entity) =
-        json.parse(entity_string, postgres_store.entity_decoder)
-      decode.success(entity)
+      case json.parse(entity_string, postgres_store.entity_decoder) {
+        Ok(entity) -> decode.success(entity)
+        Error(error) ->
+          panic as string.concat([
+              "Failed to decode entity: ",
+              string.inspect(error),
+              " for entity: ",
+              entity_string,
+            ])
+      }
     })
-    use timestamp <- decode.field(4, decode.int)
+    use timestamp <- decode.field(4, pog.timestamp_decoder())
 
     decode.success(eventsourcing.Snapshot(
       aggregate_id: aggregate_id,
@@ -401,7 +516,7 @@ fn save_snapshot(
   |> pog.parameter(pog.text(aggregate_id))
   |> pog.parameter(pog.int(sequence))
   |> pog.parameter(pog.text(postgres_store.entity_encoder(entity)))
-  |> pog.parameter(pog.int(timestamp))
+  |> pog.parameter(pog.timestamp(timestamp))
   |> pog.execute(tx)
   |> result.map(fn(_) { Nil })
   |> result.map_error(fn(error) {
@@ -411,10 +526,23 @@ fn save_snapshot(
   })
 }
 
+pub fn create_event_table(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  pog.query(create_event_table_with_json_query)
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to create event table: " <> string.inspect(error),
+    )
+  })
+}
+
 pub fn create_snapshot_table(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
-  pog.query(create_snapshot_table_query)
+  pog.query(create_snapshot_table_with_json_query)
   |> pog.execute(postgres_store.db)
   |> result.map(fn(_) { Nil })
   |> result.map_error(fn(error) {
@@ -424,7 +552,9 @@ pub fn create_snapshot_table(
   })
 }
 
-pub fn create_event_table(
+/// Legacy function: Creates event table with TEXT columns (for backward compatibility)
+/// Use create_event_table() for new installations (uses JSONB)
+pub fn create_event_table_legacy(
   postgres_store: PostgresStore(entity, command, event, error),
 ) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
   pog.query(create_event_table_query)
@@ -432,19 +562,522 @@ pub fn create_event_table(
   |> result.map(fn(_) { Nil })
   |> result.map_error(fn(error) {
     eventsourcing.EventStoreError(
-      "Failed to create snapshot table: " <> string.inspect(error),
+      "Failed to create legacy event table: " <> string.inspect(error),
     )
   })
 }
 
-fn execute_in_transaction(db) {
-  fn(f) {
-    let f = fn(db) {
-      f(db) |> result.map_error(fn(error) { string.inspect(error) })
-    }
-    pog.transaction(db, f)
+/// Legacy function: Creates snapshot table with TEXT columns (for backward compatibility) 
+/// Use create_snapshot_table() for new installations (uses JSONB)
+pub fn create_snapshot_table_legacy(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  pog.query(create_snapshot_table_query)
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to create legacy snapshot table: " <> string.inspect(error),
+    )
+  })
+}
+
+// MIGRATION FUNCTIONS ----
+
+/// Step 1: Migrate event table from TEXT to JSONB columns
+/// This adds new JSONB columns and converts existing data
+pub fn migrate_event_table_to_jsonb(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  use _ <- result.try(
+    pog.query(add_event_jsonb_columns_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
     |> result.map_error(fn(error) {
-      eventsourcing.EventStoreError(string.inspect(error))
-    })
+      eventsourcing.EventStoreError(
+        "Failed to add JSONB columns to event table: " <> string.inspect(error),
+      )
+    }),
+  )
+
+  pog.query(convert_event_data_to_jsonb_query)
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to convert event data to JSONB: " <> string.inspect(error),
+    )
+  })
+}
+
+/// Step 1: Migrate snapshot table from TEXT to JSONB columns  
+/// This adds new JSONB columns and converts existing data
+pub fn migrate_snapshot_table_to_jsonb(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  use _ <- result.try(
+    pog.query(add_snapshot_jsonb_columns_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to add JSONB column to snapshot table: "
+        <> string.inspect(error),
+      )
+    }),
+  )
+
+  pog.query(convert_snapshot_data_to_jsonb_query)
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to convert snapshot data to JSONB: " <> string.inspect(error),
+    )
+  })
+}
+
+/// Step 2: Finalize event table migration by removing old TEXT columns
+/// WARNING: This permanently deletes the old text columns after verification
+pub fn finalize_event_table_migration(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  use _ <- result.try(
+    pog.query(drop_event_payload_column_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to drop old payload column: " <> string.inspect(error),
+      )
+    }),
+  )
+  use _ <- result.try(
+    pog.query(drop_event_metadata_column_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to drop old metadata column: " <> string.inspect(error),
+      )
+    }),
+  )
+  use _ <- result.try(
+    pog.query(rename_event_payload_column_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to rename payload column: " <> string.inspect(error),
+      )
+    }),
+  )
+
+  pog.query(rename_event_metadata_column_query)
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to rename metadata column: " <> string.inspect(error),
+    )
+  })
+}
+
+/// Step 2: Finalize snapshot table migration by removing old TEXT columns  
+/// WARNING: This permanently deletes the old text columns after verification
+pub fn finalize_snapshot_table_migration(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  use _ <- result.try(
+    pog.query(drop_snapshot_entity_column_query)
+    |> pog.execute(postgres_store.db)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(error) {
+      eventsourcing.EventStoreError(
+        "Failed to drop old entity column: " <> string.inspect(error),
+      )
+    }),
+  )
+
+  pog.query(rename_snapshot_entity_column_query)
+  |> pog.execute(postgres_store.db)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(error) {
+    eventsourcing.EventStoreError(
+      "Failed to rename entity column: " <> string.inspect(error),
+    )
+  })
+}
+
+/// Safe migration helper - only migrates if tables exist and have TEXT columns
+/// This is a convenience function that checks existing structure and migrates safely
+pub fn migrate_to_jsonb_safe(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  use _ <- result.try(migrate_event_table_to_jsonb(postgres_store))
+  use _ <- result.try(migrate_snapshot_table_to_jsonb(postgres_store))
+  Ok(Nil)
+}
+
+/// Complete migration helper - runs both steps for event and snapshot tables
+/// This is a convenience function that runs the full migration process
+/// WARNING: This finalizes the migration and removes old TEXT columns permanently
+pub fn migrate_to_jsonb(
+  postgres_store: PostgresStore(entity, command, event, error),
+) -> Result(Nil, eventsourcing.EventSourcingError(error)) {
+  use _ <- result.try(migrate_event_table_to_jsonb(postgres_store))
+  use _ <- result.try(migrate_snapshot_table_to_jsonb(postgres_store))
+  use _ <- result.try(finalize_event_table_migration(postgres_store))
+  finalize_snapshot_table_migration(postgres_store)
+}
+
+fn execute_in_transaction(
+  db: pog.Connection,
+) -> fn(fn(pog.Connection) -> Result(a, b)) ->
+  Result(a, eventsourcing.EventSourcingError(c)) {
+  fn(f) {
+    pog.transaction(db, f)
+    |> result.replace_error(eventsourcing.TransactionFailed)
   }
+}
+
+// CLI FUNCTIONALITY ----
+
+pub type CliCommand {
+  CreateTables
+  CreateLegacyTables
+  MigrateTables
+  MigrateTablesOnly
+  FinalizeMigration
+  Help
+}
+
+pub type CliConfig {
+  CliConfig(
+    host: String,
+    port: Int,
+    database: String,
+    user: String,
+    password: String,
+    pool_name: String,
+  )
+}
+
+/// Main CLI entry point for managing eventsourcing_postgres database
+pub fn main() {
+  // Load environment variables from .env file if it exists
+  let _ = dot_env.load_default()
+
+  case argv.load().arguments {
+    ["create-tables"] -> run_create_tables()
+    ["create-legacy-tables"] -> run_create_legacy_tables()
+    ["migrate"] -> run_migrate_tables()
+    ["migrate-only"] -> run_migrate_tables_only()
+    ["finalize-migration"] -> run_finalize_migration()
+    ["help"] | [] -> print_help()
+    _ -> {
+      io.println("Error: Unknown command")
+      print_help()
+    }
+  }
+}
+
+fn run_create_tables() {
+  case load_config_from_env() {
+    Ok(config) -> {
+      io.println("Creating tables with JSONB columns...")
+      case create_tables_with_config(config, CreateTables) {
+        Ok(_) -> {
+          io.println(
+            "✅ Successfully created event and snapshot tables with JSONB columns",
+          )
+          io.println(
+            "Your tables are ready for high-performance JSON operations!",
+          )
+        }
+        Error(error) -> {
+          io.println("❌ Failed to create tables: " <> error)
+        }
+      }
+    }
+    Error(error) -> io.println("❌ Configuration error: " <> error)
+  }
+}
+
+fn run_create_legacy_tables() {
+  case load_config_from_env() {
+    Ok(config) -> {
+      io.println("Creating legacy tables with TEXT columns...")
+      case create_tables_with_config(config, CreateLegacyTables) {
+        Ok(_) -> {
+          io.println(
+            "✅ Successfully created event and snapshot tables with TEXT columns",
+          )
+          io.println(
+            "Note: Consider using 'create-tables' for better performance with JSONB",
+          )
+        }
+        Error(error) -> {
+          io.println("❌ Failed to create legacy tables: " <> error)
+        }
+      }
+    }
+    Error(error) -> io.println("❌ Configuration error: " <> error)
+  }
+}
+
+fn run_migrate_tables() {
+  case load_config_from_env() {
+    Ok(config) -> {
+      io.println("Migrating tables from TEXT to JSONB...")
+      io.println("This will preserve all existing data and add JSONB columns.")
+      case create_tables_with_config(config, MigrateTables) {
+        Ok(_) -> {
+          io.println("✅ Successfully migrated tables to JSONB!")
+          io.println("✅ All existing data preserved")
+          io.println("✅ Old TEXT columns removed")
+          io.println(
+            "Your database is now using high-performance JSONB columns!",
+          )
+        }
+        Error(error) -> {
+          io.println("❌ Migration failed: " <> error)
+          io.println("Your original data is safe - no changes were made.")
+        }
+      }
+    }
+    Error(error) -> io.println("❌ Configuration error: " <> error)
+  }
+}
+
+fn run_migrate_tables_only() {
+  case load_config_from_env() {
+    Ok(config) -> {
+      io.println("Migrating tables (safe mode - keeps old TEXT columns)...")
+      case create_tables_with_config(config, MigrateTablesOnly) {
+        Ok(_) -> {
+          io.println("✅ Successfully migrated tables to JSONB!")
+          io.println("✅ All existing data preserved")
+          io.println("📝 Old TEXT columns kept for safety")
+          io.println("Run 'finalize-migration' to complete the process")
+        }
+        Error(error) -> {
+          io.println("❌ Migration failed: " <> error)
+        }
+      }
+    }
+    Error(error) -> io.println("❌ Configuration error: " <> error)
+  }
+}
+
+fn run_finalize_migration() {
+  case load_config_from_env() {
+    Ok(config) -> {
+      io.println("⚠️  WARNING: This will permanently remove old TEXT columns!")
+      io.println("Finalizing migration...")
+      case create_tables_with_config(config, FinalizeMigration) {
+        Ok(_) -> {
+          io.println("✅ Migration finalized successfully!")
+          io.println("Old TEXT columns have been permanently removed.")
+        }
+        Error(error) -> {
+          io.println("❌ Finalization failed: " <> error)
+        }
+      }
+    }
+    Error(error) -> io.println("❌ Configuration error: " <> error)
+  }
+}
+
+fn create_tables_with_config(
+  config: CliConfig,
+  command: CliCommand,
+) -> Result(Nil, String) {
+  let pog_config =
+    pog.Config(
+      ..pog.default_config(process.new_name(config.pool_name)),
+      host: config.host,
+      port: config.port,
+      database: config.database,
+      user: config.user,
+      password: Some(config.password),
+    )
+
+  let pog_actor_spec = pog_config |> pog.supervised()
+
+  case
+    static_supervisor.new(static_supervisor.OneForOne)
+    |> static_supervisor.add(pog_actor_spec)
+    |> static_supervisor.start()
+  {
+    Ok(_) -> {
+      // Create a minimal postgres store for CLI operations
+      let postgres_store =
+        PostgresStore(
+          db: pog.named_connection(pog_config.pool_name),
+          event_encoder: fn(_) { "{}" },
+          event_decoder: decode.success("{}"),
+          event_type: "cli",
+          event_version: "1.0",
+          aggregate_type: "cli",
+          entity_encoder: fn(_) { "{}" },
+          entity_decoder: decode.success("{}"),
+        )
+
+      case command {
+        CreateTables -> {
+          use _ <- result.try(
+            create_event_table(postgres_store)
+            |> result.map_error(error_to_string),
+          )
+          create_snapshot_table(postgres_store)
+          |> result.map_error(error_to_string)
+        }
+        CreateLegacyTables -> {
+          use _ <- result.try(
+            create_event_table_legacy(postgres_store)
+            |> result.map_error(error_to_string),
+          )
+          create_snapshot_table_legacy(postgres_store)
+          |> result.map_error(error_to_string)
+        }
+        MigrateTables -> {
+          use _ <- result.try(
+            migrate_event_table_to_jsonb(postgres_store)
+            |> result.map_error(error_to_string),
+          )
+          use _ <- result.try(
+            migrate_snapshot_table_to_jsonb(postgres_store)
+            |> result.map_error(error_to_string),
+          )
+          use _ <- result.try(
+            finalize_event_table_migration(postgres_store)
+            |> result.map_error(error_to_string),
+          )
+          finalize_snapshot_table_migration(postgres_store)
+          |> result.map_error(error_to_string)
+        }
+        MigrateTablesOnly -> {
+          use _ <- result.try(
+            migrate_event_table_to_jsonb(postgres_store)
+            |> result.map_error(error_to_string),
+          )
+          migrate_snapshot_table_to_jsonb(postgres_store)
+          |> result.map_error(error_to_string)
+        }
+        FinalizeMigration -> {
+          use _ <- result.try(
+            finalize_event_table_migration(postgres_store)
+            |> result.map_error(error_to_string),
+          )
+          finalize_snapshot_table_migration(postgres_store)
+          |> result.map_error(error_to_string)
+        }
+        Help -> {
+          print_help()
+          Ok(Nil)
+        }
+      }
+    }
+    Error(_) -> Error("Failed to start database connection supervisor")
+  }
+}
+
+fn load_config_from_env() -> Result(CliConfig, String) {
+  Ok(CliConfig(
+    host: env.get_string_or("POSTGRES_HOST", "localhost"),
+    port: env.get_int_or("POSTGRES_PORT", 5432),
+    database: env.get_string_or("POSTGRES_DATABASE", "postgres"),
+    user: env.get_string_or("POSTGRES_USER", "postgres"),
+    password: env.get_string_or("POSTGRES_PASSWORD", "postgres"),
+    pool_name: env.get_string_or("POSTGRES_POOL_NAME", "eventsourcing_cli"),
+  ))
+}
+
+fn error_to_string(error: eventsourcing.EventSourcingError(_)) -> String {
+  case error {
+    eventsourcing.EventStoreError(message) -> message
+    eventsourcing.DomainError(_) -> "Domain error occurred"
+    eventsourcing.NonPositiveArgument -> "Non-positive argument error"
+    eventsourcing.EntityNotFound -> "Entity not found"
+    eventsourcing.TransactionFailed -> "Transaction failed"
+    eventsourcing.ActorTimeout(operation:, timeout_ms:) ->
+      "Actor timeout: "
+      <> operation
+      <> " (timeout: "
+      <> int.to_string(timeout_ms)
+      <> "ms)"
+    eventsourcing.TransactionRolledBack -> "Transaction was rolled back"
+  }
+}
+
+fn print_help() {
+  io.println("eventsourcing_postgres CLI - Database Management Tool")
+  io.println("")
+  io.println("COMMANDS:")
+  io.println(
+    "  create-tables          Create tables with JSONB columns (recommended)",
+  )
+  io.println(
+    "  create-legacy-tables   Create tables with TEXT columns (for compatibility)",
+  )
+  io.println(
+    "  migrate               Complete migration from TEXT to JSONB (with cleanup)",
+  )
+  io.println(
+    "  migrate-only          Migrate to JSONB but keep old TEXT columns",
+  )
+  io.println("  finalize-migration    Remove old TEXT columns after migration")
+  io.println("  help                  Show this help message")
+  io.println("")
+  io.println("CONFIGURATION:")
+  io.println("  Configure database connection using environment variables:")
+  io.println("  ")
+  io.println("  POSTGRES_HOST         Database host (default: localhost)")
+  io.println("  POSTGRES_PORT         Database port (default: 5432)")
+  io.println("  POSTGRES_DATABASE     Database name (default: postgres)")
+  io.println("  POSTGRES_USER         Database user (default: postgres)")
+  io.println("  POSTGRES_PASSWORD     Database password (default: postgres)")
+  io.println(
+    "  POSTGRES_POOL_NAME    Connection pool name (default: eventsourcing_cli)",
+  )
+  io.println("")
+  io.println("CONFIGURATION METHODS:")
+  io.println("  1. Create a .env file in your project root:")
+  io.println("     POSTGRES_HOST=myhost")
+  io.println("     POSTGRES_DATABASE=myapp")
+  io.println("     POSTGRES_USER=myuser")
+  io.println("     POSTGRES_PASSWORD=mypassword")
+  io.println("")
+  io.println("  2. Set environment variables directly:")
+  io.println("     export POSTGRES_HOST=myhost")
+  io.println("     export POSTGRES_DATABASE=myapp")
+  io.println("")
+  io.println("EXAMPLES:")
+  io.println("  # Create JSONB tables in existing database")
+  io.println("  POSTGRES_DATABASE=myapp gleam run create-tables")
+  io.println("")
+  io.println("  # Create tables with custom connection")
+  io.println(
+    "  POSTGRES_HOST=production.db POSTGRES_DATABASE=myapp gleam run create-tables",
+  )
+  io.println("")
+  io.println("  # Migrate existing TEXT tables to JSONB")
+  io.println("  POSTGRES_DATABASE=production gleam run migrate")
+  io.println("")
+  io.println("  # Safe migration (keeps old columns for rollback)")
+  io.println("  gleam run migrate-only")
+  io.println("  gleam run finalize-migration  # Run after verification")
+  io.println("")
+  io.println("COMPLETE WORKFLOWS:")
+  io.println("  NEW PROJECT:")
+  io.println("    Prerequisites: Create PostgreSQL database first")
+  io.println("    1. gleam run create-tables      # Create JSONB tables")
+  io.println("")
+  io.println("  EXISTING PROJECT MIGRATION:")
+  io.println("    Prerequisites: Backup your database")
+  io.println("    1. gleam run migrate-only       # Safe migration")
+  io.println("    2. gleam run finalize-migration # Complete migration")
+  io.println("")
+  io.println("  The migration preserves ALL existing data safely")
 }

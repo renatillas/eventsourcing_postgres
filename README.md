@@ -45,6 +45,9 @@
 - **Snapshotting**: Optimize aggregate rebuilding with configurable snapshots.
 - **Type-safe Error Handling**: Comprehensive error types and Result-based API.
 - **Concurrency Safe**: Uses pessimistic concurrency to ensure safe concurrent access.
+- **JSONB Support**: Native PostgreSQL JSONB columns for better performance and querying.
+- **Database Migration**: Safe migration tools from TEXT to JSONB columns.
+- **CLI Tools**: Command-line interface for database management and migrations.
 
 ## Example
 
@@ -118,6 +121,21 @@ eventsourcing_postgres is built by Renatillas.
 Contributions are very welcome!
 If you've spotted a bug, or would like to suggest a feature,
 please open an issue or a pull request.
+
+## Testing
+
+The library includes comprehensive tests to ensure reliability:
+
+```sh
+# Run all tests
+gleam test
+
+# Run tests with Docker PostgreSQL
+docker compose up -d
+gleam test
+```
+
+**Note**: Some test log entries like `relation "snapshot" does not exist` are expected behavior from tests that intentionally validate error handling when database tables are missing.
 
 ## Contributing
 
