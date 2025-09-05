@@ -109,7 +109,8 @@ pub fn test_concurrent_event_operations_test() {
         eventsourcing.execute_with_metadata(
           event_sourcing,
           account_id,
-          example_bank_account.DepositMoney(100.0), // Large deposit to ensure sufficient balance
+          example_bank_account.DepositMoney(100.0),
+          // Large deposit to ensure sufficient balance
           [#("operation", "deposit")],
         )
         Ok(Nil)
@@ -117,7 +118,8 @@ pub fn test_concurrent_event_operations_test() {
     })
 
   let assert Ok(_) = taskle.try_await_all(deposit_tasks, 15_000)
-  process.sleep(300) // Ensure all deposits are fully processed
+  process.sleep(300)
+  // Ensure all deposits are fully processed
 
   // Then, perform all withdrawals concurrently (safe - accounts now have balance)
   let withdraw_tasks =

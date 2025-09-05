@@ -921,7 +921,7 @@ fn execute_with_retry(
 
 // CLI FUNCTIONALITY ----
 
-pub type CliCommand {
+type CliCommand {
   CreateTables
   MigrateTables
   MigrateTablesOnly
@@ -929,7 +929,7 @@ pub type CliCommand {
   Help
 }
 
-pub type CliConfig {
+type CliConfig {
   CliConfig(
     host: String,
     port: Int,
