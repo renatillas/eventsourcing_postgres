@@ -13,7 +13,7 @@ repository = { type = "github", user = "renatillas", repo = "eventsourcing_postg
 
 [dependencies]
 gleam_stdlib = ">= 0.52.0 and < 2.0.0"
-eventsourcing = { path = "../eventsourcing" }
+eventsourcing = ">= 9.0.0 and < 10.0.0"
 pog = ">= 4.1.0 and < 5.0.0"
 gleam_json = ">= 3.0.2 and < 4.0.0"
 gleam_otp = ">= 1.1.0 and < 2.0.0"
